@@ -1,0 +1,310 @@
+// This Pine Script® code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © taghi_khavari
+
+//@version=5
+indicator("Taghi/Gemini Sequential V9", "Taghi/Gemini Sequential V9", overlay=true, max_labels_count=500, max_lines_count=500)
+
+// ----------------------------------------------------
+// 0) Inputs / Parameters
+// ----------------------------------------------------
+bool useSameDirectionCD = input.bool(true, "Start Countdown After Same-Direction Setup", group="Countdown Options")
+bool strict13 = input.bool(true, "Strict 13 Qualifier", group="13 Qualifier")
+string qual13Mode = input.string("Low/High vs bar 8", "13 Qualifier Mode", options=["Close vs bar 8", "Low/High vs bar 8"], group="13 Qualifier")
+bool resetCDOnOppFlip = input.bool(true, "Reset Countdown On Opposite Flip", group="Countdown Options")
+bool useTDCombo = input.bool(true, "Use TD Combo Qualification (Higher Accuracy)", group="TD Combo")
+bool useAggressiveCD = input.bool(true, "Use Aggressive Countdown", group="Countdown Options")
+
+bool showSetupNumbers = input.bool(true, "Show Setup Numbers (1-9)", group="Display Options")
+bool showCountdownNumbers = input.bool(true, "Show Countdown Numbers (1-13)", group="Display Options")
+bool showOnlyFinalSignals = input.bool(false, "Show Only Final Signals (B9, S9, 13)", group="Display Options")
+bool showPerfection = input.bool(true, "Show Perfection Markers (P)", group="Display Options")
+bool showTDST = input.bool(true, "Show TDST Lines", group="Display Options")
+bool showTDSTStopLoss = input.bool(true, "Show TDST Stop Loss (SL)", group="Display Options")
+int breakoutStrength = input.int(1, "Breakout Strength (in pips/ticks)", minval=0, group="TDST Breakout")
+bool showTDReactionLine = input.bool(true, "Show TD Reaction Line", group="Display Options")
+
+// Color Inputs
+color buySetupColor = input.color(color.new(color.green, 90), "Buy Setup Color", group="Color Settings")
+color sellSetupColor = input.color(color.new(color.red, 90), "Sell Setup Color", group="Color Settings")
+color countdownColor = input.color(color.new(color.fuchsia, 70), "Countdown Color", group="Color Settings")
+color perfectionColor = input.color(color.new(color.white, 50), "Perfection Color", group="Color Settings")
+color buyReactColor = input.color(color.new(color.green, 50), "Buy Reaction Color", group="Color Settings")
+color sellReactColor = input.color(color.new(color.red, 50), "Sell Reaction Color", group="Color Settings")
+color buyTDSTColor = input.color(color.new(color.green, 0), "Buy TDST Color", group="Color Settings")
+color sellTDSTColor = input.color(color.new(color.red, 0), "Sell TDST Color", group="Color Settings")
+color invalidationColor = input.color(color.new(color.gray, 50), "Invalidated Color", group="Color Settings")
+
+// ----------------------------------------------------
+// 1) Core Definitions & State Variables
+// ----------------------------------------------------
+float atrValue = ta.atr(14)
+float labelOffset = atrValue * 0.5 // Dynamic offset based on ATR
+
+var int buySetupCount = na
+var int sellSetupCount = na
+var int buyCDCount = na
+var int sellCDCount = na
+var float buyCD8Level = na
+var float sellCD8Level = na
+var int buyCD8Bar = na
+var int sellCD8Bar = na
+var bool clearBuyNext = false
+var bool clearSellNext = false
+var float buyTDST1 = na
+var float buyTDST9 = na
+var float sellTDST1 = na
+var float sellTDST9 = na
+var line buyTDSTLine = na
+var line sellTDSTLine = na
+var bool buyTDSTInvalidated = false
+var bool sellTDSTInvalidated = false
+var bool buyTDSTStopLossSeen = false
+var bool sellTDSTStopLossSeen = false
+var int buy13Bar = na
+var int sell13Bar = na
+var float buy13Close = na
+var float sell13Close = na
+var int buyReactUntil = na
+var int sellReactUntil = na
+var bool buyReactSeen = false
+var bool sellReactSeen = false
+var line buy13CloseLine = na
+var line sell13CloseLine = na
+var line buyTDSTRiskLine = na
+var line sellTDSTRiskLine = na
+
+// ----------------------------------------------------
+// 2) Per-bar Procedure (Linear Logic)
+// ----------------------------------------------------
+
+if bar_index >= 5
+    // Handle price flips & setup initialization
+    isBullishFlip = close < close[4] and close[1] > close[5]
+    isBearishFlip = close > close[4] and close[1] < close[5]
+
+    if isBullishFlip
+        buySetupCount := 1
+        sellSetupCount := na
+        if resetCDOnOppFlip
+            sellCDCount := na
+        sellTDSTInvalidated := false
+        sellTDSTStopLossSeen := false
+    else if isBearishFlip
+        sellSetupCount := 1
+        buySetupCount := na
+        if resetCDOnOppFlip
+            buyCDCount := na
+        buyTDSTInvalidated := false
+        buyTDSTStopLossSeen := false
+
+    // Setup counting (consecutive)
+    if not na(buySetupCount)
+        buySetupCount := close <= close[4] ? buySetupCount + 1 : na
+    
+    if not na(sellSetupCount)
+        sellSetupCount := close >= close[4] ? sellSetupCount + 1 : na
+
+    // Start countdowns after a completed setup 9
+    if not na(buySetupCount[1]) and buySetupCount[1] == 9 and na(buyCDCount) and useSameDirectionCD
+        buyCDCount := 0
+        buyCD8Level := na
+        buyCD8Bar := na
+        buyTDSTInvalidated := false
+        buyTDSTStopLossSeen := false
+        if showTDST
+            buyTDST1 := low[9]
+            buyTDST9 := low[1]
+            if na(buyTDSTLine)
+                buyTDSTLine := line.new(bar_index - 9, buyTDST1, bar_index, buyTDST1, color=buyTDSTColor, style=line.style_solid, width=2)
+            else
+                line.set_xy1(buyTDSTLine, bar_index - 9, buyTDST1)
+                line.set_xy2(buyTDSTLine, bar_index, buyTDST1)
+                line.set_color(buyTDSTLine, buyTDSTColor)
+                line.set_style(buyTDSTLine, line.style_solid)
+            
+            if na(buyTDSTRiskLine)
+                buyTDSTRiskLine := line.new(bar_index, low[1], bar_index, low[1], color=buyTDSTColor, style=line.style_dotted, width=1)
+            else
+                line.set_xy1(buyTDSTRiskLine, bar_index, low[1])
+                line.set_xy2(buyTDSTRiskLine, bar_index, low[1])
+                line.set_color(buyTDSTRiskLine, buyTDSTColor)
+                line.set_style(buyTDSTRiskLine, line.style_dotted)
+    
+    if not na(sellSetupCount[1]) and sellSetupCount[1] == 9 and na(sellCDCount) and useSameDirectionCD
+        sellCDCount := 0
+        sellCD8Level := na
+        sellCD8Bar := na
+        sellTDSTInvalidated := false
+        sellTDSTStopLossSeen := false
+        if showTDST
+            sellTDST1 := high[9]
+            sellTDST9 := high[1]
+            if na(sellTDSTLine)
+                sellTDSTLine := line.new(bar_index - 9, sellTDST1, bar_index, sellTDST1, color=sellTDSTColor, style=line.style_solid, width=2)
+            else
+                line.set_xy1(sellTDSTLine, bar_index - 9, sellTDST1)
+                line.set_xy2(sellTDSTLine, bar_index, sellTDST1)
+                line.set_color(sellTDSTLine, sellTDSTColor)
+                line.set_style(sellTDSTLine, line.style_solid)
+
+            if na(sellTDSTRiskLine)
+                sellTDSTRiskLine := line.new(bar_index, high[1], bar_index, high[1], color=sellTDSTColor, style=line.style_dotted, width=1)
+            else
+                line.set_xy1(sellTDSTRiskLine, bar_index, high[1])
+                line.set_xy2(sellTDSTRiskLine, bar_index, high[1])
+                line.set_color(sellTDSTRiskLine, sellTDSTColor)
+                line.set_style(sellTDSTRiskLine, line.style_dotted)
+
+    // Countdown increments (non-consecutive) + capture #8
+    if not na(buyCDCount)
+        bool cdCondition = useAggressiveCD ? close < low[1] : close <= low[2]
+        if useTDCombo
+            cdCondition := cdCondition and close > high[1]
+        if cdCondition
+            buyCDCount := buyCDCount + 1
+        if buyCDCount == 8
+            buyCD8Level := low
+            buyCD8Bar := bar_index
+
+    if not na(sellCDCount)
+        bool cdCondition = useAggressiveCD ? close > high[1] : close >= high[2]
+        if useTDCombo
+            cdCondition := cdCondition and close < low[1]
+        if cdCondition
+            sellCDCount := sellCDCount + 1
+        if sellCDCount == 8
+            sellCD8Level := high
+            sellCD8Bar := bar_index
+
+    // 13-bar qualifier (strict vs relaxed) & delayed clear
+    isBuy13Qualified = false
+    if not na(buyCDCount) and buyCDCount >= 13
+        isBuy13Qualified := not strict13 or (not na(buyCD8Level) and (qual13Mode == "Close vs bar 8" ? close <= buyCD8Level : low <= buyCD8Level))
+        if isBuy13Qualified
+            clearBuyNext := true
+            buy13Bar := bar_index
+            buy13Close := close
+            buyReactUntil := bar_index + 12
+            buyReactSeen := false
+            if showTDReactionLine
+                if na(buy13CloseLine)
+                    buy13CloseLine := line.new(buy13Bar, buy13Close, buy13Bar, buy13Close, color=buyReactColor, style=line.style_dashed, width=1)
+                else
+                    line.set_xy1(buy13CloseLine, buy13Bar, buy13Close)
+                    line.set_xy2(buy13CloseLine, buy13Bar, buy13Close)
+                    line.set_color(buy13CloseLine, buyReactColor)
+            if not showOnlyFinalSignals
+                label.new(bar_index, low - labelOffset, text="13", color=countdownColor, textcolor=color.white, style=label.style_label_up, yloc=yloc.belowbar, size=size.normal)
+
+    isSell13Qualified = false
+    if not na(sellCDCount) and sellCDCount >= 13
+        isSell13Qualified := not strict13 or (not na(sellCD8Level) and (qual13Mode == "Close vs bar 8" ? close >= sellCD8Level : high >= sellCD8Level))
+        if isSell13Qualified
+            clearSellNext := true
+            sell13Bar := bar_index
+            sell13Close := close
+            sellReactUntil := bar_index + 12
+            sellReactSeen := false
+            if showTDReactionLine
+                if na(sell13CloseLine)
+                    sell13CloseLine := line.new(sell13Bar, sell13Close, sell13Bar, sell13Close, color=sellReactColor, style=line.style_dashed, width=1)
+                else
+                    line.set_xy1(sell13CloseLine, sell13Bar, sell13Close)
+                    line.set_xy2(sell13CloseLine, sell13Bar, sell13Close)
+                    line.set_color(sell13CloseLine, sellReactColor)
+            if not showOnlyFinalSignals
+                label.new(bar_index, high + labelOffset, text="13", color=countdownColor, textcolor=color.white, style=label.style_label_down, yloc=yloc.abovebar, size=size.normal)
+    
+    // Clear on the next bar
+    if clearBuyNext[1]
+        buyCDCount := na
+        buyCD8Level := na
+        buyCD8Bar := na
+        clearBuyNext := false
+
+    if clearSellNext[1]
+        sellCDCount := na
+        sellCD8Level := na
+        sellCD8Bar := na
+        clearSellNext := false
+
+    // Perfection
+    isBuyPerfected = not na(buySetupCount) and buySetupCount == 9 and (high[1] <= low[2] or high[1] <= low[3])
+    isSellPerfected = not na(sellSetupCount) and sellSetupCount == 9 and (low[1] >= high[2] or low[1] >= high[3])
+    
+    if showPerfection and isBuyPerfected and not showOnlyFinalSignals
+        label.new(bar_index, low - labelOffset, text="P", color=perfectionColor, textcolor=color.white, style=label.style_circle, yloc=yloc.belowbar, size=size.small)
+    if showPerfection and isSellPerfected and not showOnlyFinalSignals
+        label.new(bar_index, high + labelOffset, text="P", color=perfectionColor, textcolor=color.white, style=label.style_circle, yloc=yloc.abovebar, size=size.small)
+
+    // Reaction Window
+    if not na(buy13Bar)
+        if not na(buy13CloseLine)
+            line.set_x2(buy13CloseLine, bar_index)
+        if not buyReactSeen and bar_index > buy13Bar and bar_index <= buyReactUntil and close > buy13Close and not showOnlyFinalSignals
+            buyReactSeen := true
+            label.new(bar_index, low - labelOffset, text="REACT", color=buyReactColor, textcolor=color.white, style=label.style_label_up, yloc=yloc.belowbar, size=size.normal)
+    if not na(sell13Bar)
+        if not na(sell13CloseLine)
+            line.set_x2(sell13CloseLine, bar_index)
+        if not sellReactSeen and bar_index > sell13Bar and bar_index <= sellReactUntil and close < sell13Close and not showOnlyFinalSignals
+            sellReactSeen := true
+            label.new(bar_index, high + labelOffset, text="REACT", color=sellReactColor, textcolor=color.white, style=label.style_label_down, yloc=yloc.abovebar, size=size.normal)
+
+    // TDST Line Extensions and invalidation/breakout
+    if showTDST
+        // Buy TDST Lines
+        if not na(buyTDSTLine)
+            line.set_x2(buyTDSTLine, bar_index)
+        if not na(buyTDSTRiskLine)
+            line.set_x2(buyTDSTRiskLine, bar_index)
+        
+        if not buyTDSTInvalidated and (close < buyTDST1 or close < buyTDST9)
+            buyTDSTInvalidated := true
+            line.set_color(buyTDSTLine, invalidationColor)
+        
+        if showTDSTStopLoss and not buyTDSTStopLossSeen and (isBullishFlip or isBearishFlip) and close > buyTDST1 + breakoutStrength and close > buyTDST9 + breakoutStrength
+            buyTDSTStopLossSeen := true
+            label.new(bar_index, high + labelOffset, text="SL", color=color.new(color.gray, 50), textcolor=color.white, style=label.style_label_down, size=size.small, yloc=yloc.abovebar)
+
+        // Sell TDST Lines
+        if not na(sellTDSTLine)
+            line.set_x2(sellTDSTLine, bar_index)
+        if not na(sellTDSTRiskLine)
+            line.set_x2(sellTDSTRiskLine, bar_index)
+            
+        if not sellTDSTInvalidated and (close > sellTDST1 or close > sellTDST9)
+            sellTDSTInvalidated := true
+            line.set_color(sellTDSTLine, invalidationColor)
+        
+        if showTDSTStopLoss and not sellTDSTStopLossSeen and (isBullishFlip or isBearishFlip) and close < sellTDST1 - breakoutStrength and close < sellTDST9 - breakoutStrength
+            sellTDSTStopLossSeen := true
+            label.new(bar_index, low - labelOffset, text="SL", color=color.new(color.gray, 50), textcolor=color.white, style=label.style_label_up, size=size.small, yloc=yloc.belowbar)
+            
+    // Rendering Logic for Consolidated Labels
+    
+    // Case 1: Final Signal Only
+    if showOnlyFinalSignals
+        if not na(buySetupCount) and buySetupCount == 9
+            label.new(bar_index, low - labelOffset, text=isBuyPerfected ? "B9P" : "B9", color=buySetupColor, textcolor=color.white, style=label.style_label_up, yloc=yloc.belowbar, size=size.normal)
+        if not na(sellSetupCount) and sellSetupCount == 9
+            label.new(bar_index, high + labelOffset, text=isSellPerfected ? "S9P" : "S9", color=sellSetupColor, textcolor=color.white, style=label.style_label_down, yloc=yloc.abovebar, size=size.normal)
+        if not na(buyCDCount) and buyCDCount == 13
+            label.new(bar_index, low - labelOffset, text="B13", color=countdownColor, textcolor=color.white, style=label.style_label_up, yloc=yloc.belowbar, size=size.normal)
+        if not na(sellCDCount) and sellCDCount == 13
+            label.new(bar_index, high + labelOffset, text="S13", color=countdownColor, textcolor=color.white, style=label.style_label_down, yloc=yloc.abovebar, size=size.normal)
+    else
+        // Case 2: Show all or key counts
+        // Setup digits
+        if showSetupNumbers
+            if not na(buySetupCount) and buySetupCount >= 1 and buySetupCount <= 9
+                label.new(bar_index, low - labelOffset, text=str.tostring(buySetupCount), color=buySetupColor, textcolor=color.white, style=label.style_label_up, yloc=yloc.belowbar, size=buySetupCount == 9 ? size.normal : size.small)
+            if not na(sellSetupCount) and sellSetupCount >= 1 and sellSetupCount <= 9
+                label.new(bar_index, high + labelOffset, text=str.tostring(sellSetupCount), color=sellSetupColor, textcolor=color.white, style=label.style_label_down, yloc=yloc.abovebar, size=sellSetupCount == 9 ? size.normal : size.small)
+        
+        // Countdown digits
+        if showCountdownNumbers
+            if not na(buyCDCount) and buyCDCount > 0 and buyCDCount < 13
+                label.new(bar_index, low - labelOffset, text=str.tostring(buyCDCount), color=countdownColor, textcolor=color.white, style=label.style_label_up, yloc=yloc.belowbar, size=buyCDCount >= 12 ? size.normal : size.small)
+            if not na(sellCDCount) and sellCDCount > 0 and sellCDCount < 13
+                label.new(bar_index, high + labelOffset, text=str.tostring(sellCDCount), color=countdownColor, textcolor=color.white, style=label.style_label_down, yloc=yloc.abovebar, size=sellCDCount >= 12 ? size.normal : size.small)
